@@ -1,0 +1,159 @@
+#include <WiFi.h>
+#include <FirebaseESP32.h>
+#include <DHT.h>
+
+// ========== REPLACE THESE ==========
+#define WIFI_SSID     "Wokwi-GUEST"
+#define WIFI_PASSWORD ""
+#define FIREBASE_HOST "environment-control-a3633-default-rtdb.firebaseio.com"
+#define FIREBASE_AUTH "AIzaSyBbkXds7hJpZxI3Zz6gueWR7ak96Qx8lBY"
+// ====================================
+
+// Sensor Pins
+#define DHT_PIN     4
+#define MQ135_PIN   34
+#define MQ2_PIN     35
+#define DUST_PIN    32
+#define SOUND_PIN   33
+#define DHT_TYPE    DHT22
+
+// Output LED Pins
+#define FAN_LED     26
+#define ALARM_LED   27
+#define BUZZER_LED  14
+#define STATUS_LED  12
+
+DHT dht(DHT_PIN, DHT_TYPE);
+FirebaseData fbdo;
+FirebaseAuth auth;
+FirebaseConfig config;
+
+void setup() {
+  Serial.begin(115200);
+
+  // LED pin setup
+  pinMode(FAN_LED,    OUTPUT);
+  pinMode(ALARM_LED,  OUTPUT);
+  pinMode(BUZZER_LED, OUTPUT);
+  pinMode(STATUS_LED, OUTPUT);
+
+  // Test all LEDs on startup
+  digitalWrite(FAN_LED,    HIGH);
+  digitalWrite(ALARM_LED,  HIGH);
+  digitalWrite(BUZZER_LED, HIGH);
+  digitalWrite(STATUS_LED, HIGH);
+  delay(1000);
+  digitalWrite(FAN_LED,    LOW);
+  digitalWrite(ALARM_LED,  LOW);
+  digitalWrite(BUZZER_LED, LOW);
+  digitalWrite(STATUS_LED, LOW);
+
+  dht.begin(); 
+
+  // WiFi Connect
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  Serial.print("Connecting to WiFi");
+  while (WiFi.status() != WL_CONNECTED) {
+    Serial.print(".");
+    delay(500);
+  }
+  Serial.println("\nWiFi Connected!");
+  Serial.println(WiFi.localIP());
+  digitalWrite(STATUS_LED, HIGH);
+
+  // ✅ FIXED Firebase Setup
+  config.database_url = FIREBASE_HOST;
+  config.signer.tokens.legacy_token = FIREBASE_AUTH;
+
+  Firebase.begin(&config, &auth);
+  Firebase.reconnectWiFi(true);
+  Serial.println("Firebase Initialized!");
+}
+
+void loop() {
+
+  if (!Firebase.ready()) {
+    Serial.println("Firebase not ready...");
+    delay(1000);
+    return;
+  }
+
+  // -------- READ SENSORS --------
+  float temperature = dht.readTemperature();
+  float humidity    = dht.readHumidity();
+  int airQuality    = analogRead(MQ135_PIN);
+  int dustLevel     = analogRead(DUST_PIN);
+  int noiseLevel    = analogRead(SOUND_PIN);
+  int smokeRaw      = analogRead(MQ2_PIN);
+
+  // Validate DHT reading
+  if (isnan(temperature) || isnan(humidity)) {
+    Serial.println("DHT22 read failed! Skipping...");
+    delay(2000);
+    return;
+  }
+
+  // Convert to status values
+  int smokeStatus = (smokeRaw > 2000) ? 1 : 0;
+  int alertStatus = (smokeStatus || airQuality > 3000) ? 1 : 0;
+
+  // Print to Serial Monitor
+  Serial.println("===== Sensor Readings =====");
+  Serial.printf("Temp: %.1f C | Humidity: %.1f%%\n", temperature, humidity);
+  Serial.printf("AirQuality: %d | Dust: %d\n", airQuality, dustLevel);
+  Serial.printf("Noise: %d | Smoke: %d\n", noiseLevel, smokeStatus);
+  Serial.printf("Alert: %d\n", alertStatus);
+
+  // -------- UPLOAD TO FIREBASE --------
+  if (Firebase.setFloat(fbdo, "/sensorData/temperature", temperature))
+    Serial.println("Temp OK");
+  else
+    Serial.println("Temp Error: " + fbdo.errorReason());
+
+  Firebase.setFloat(fbdo, "/sensorData/humidity",    humidity);
+  Firebase.setInt(fbdo,   "/sensorData/airQuality",  airQuality);
+  Firebase.setInt(fbdo,   "/sensorData/dustLevel",   dustLevel);
+  Firebase.setInt(fbdo,   "/sensorData/noiseLevel",  noiseLevel);
+  Firebase.setInt(fbdo,   "/sensorData/smokeStatus", smokeStatus);
+  Firebase.setInt(fbdo,   "/sensorData/alertStatus", alertStatus);
+  Serial.println("Data Uploaded!");
+
+  // -------- READ COMMANDS FROM FIREBASE --------
+  if (Firebase.getInt(fbdo, "/commands/fanCommand")) {
+    int fanCmd = fbdo.intData();
+    digitalWrite(FAN_LED, fanCmd == 1 ? HIGH : LOW);
+    Firebase.setInt(fbdo, "/sensorData/fanStatus", fanCmd);
+    Serial.printf("Fan: %d\n", fanCmd);
+  }
+
+  if (Firebase.getInt(fbdo, "/commands/alarmCommand")) {
+    int alarmCmd = fbdo.intData();
+    digitalWrite(ALARM_LED, alarmCmd == 1 ? HIGH : LOW);
+    Serial.printf("Alarm: %d\n", alarmCmd);
+  }
+
+  if (Firebase.getInt(fbdo, "/commands/buzzerCommand")) {
+    int buzzerCmd = fbdo.intData();
+    digitalWrite(BUZZER_LED, buzzerCmd == 1 ? HIGH : LOW);
+    Serial.printf("Buzzer: %d\n", buzzerCmd);
+  }
+
+  if (Firebase.getInt(fbdo, "/commands/resetAlertCommand")) {
+    int resetCmd = fbdo.intData();
+    if (resetCmd == 1) {
+      digitalWrite(ALARM_LED,  LOW);
+      digitalWrite(BUZZER_LED, LOW);
+      Firebase.setInt(fbdo, "/sensorData/alertStatus", 0);
+      Firebase.setInt(fbdo, "/commands/resetAlertCommand", 0);
+      Serial.println("Alert Reset!");
+    }
+  }
+
+  if (Firebase.getInt(fbdo, "/commands/modeCommand")) {
+    int modeCmd = fbdo.intData();
+    Serial.printf("Mode: %d\n", modeCmd);
+  }
+
+  Serial.println("===========================");
+  delay(3000);
+}
